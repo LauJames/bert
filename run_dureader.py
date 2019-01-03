@@ -1,18 +1,17 @@
-# coding=utf-8
-# Copyright 2018 The Google AI Language Team Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Run BERT on SQuAD 1.1 and SQuAD 2.0."""
+#! /user/bin/evn python
+# -*- coding:utf8 -*-
+
+"""
+Run BERT on DuReader.
+@Reference: https://github.com/google-research/bert
+@Author   : Lau James
+@Contact  : LauJames2017@whu.edu.cn
+@Project  : bert 
+@File     : run_dureader.py
+@Time     : 18-12-24 下午2:59
+@Software : PyCharm
+@Copyright: "Copyright (c) 2018 Lau James. All Rights Reserved"
+"""
 
 from __future__ import absolute_import
 from __future__ import division
@@ -22,40 +21,53 @@ import collections
 import json
 import math
 import os
+import sys
 import random
 import modeling
 import optimization
 import tokenization
 import six
+import jieba
+import unicodedata
 import tensorflow as tf
+
+curdir = os.path.dirname(os.path.abspath(__file__)).replace('\\', '/')
+prvdir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))).replace('\\', '/')
+sys.path.insert(0, os.path.dirname(curdir))
+
+BERT_BASE_DIR = curdir + "/model/chinese_L-12_H-768_A-12"
 
 flags = tf.flags
 
 FLAGS = flags.FLAGS
 
-## Required parameters
+# Required parameters
 flags.DEFINE_string(
-    "bert_config_file", None,
+    "bert_config_file", BERT_BASE_DIR + "/bert_config.json",
     "The config json file corresponding to the pre-trained BERT model. "
     "This specifies the model architecture.")
 
-flags.DEFINE_string("vocab_file", None,
+flags.DEFINE_string("vocab_file", BERT_BASE_DIR + "/vocab.txt",
                     "The vocabulary file that the BERT model was trained on.")
 
 flags.DEFINE_string(
-    "output_dir", None,
+    "output_dir", curdir + '/result/',
     "The output directory where the model checkpoints will be written.")
 
-## Other parameters
-flags.DEFINE_string("train_file", None,
+# Other parameters
+flags.DEFINE_string("train_file", curdir + "/DuReader/preprocessed/zhidao.train.json",
                     "SQuAD json for training. E.g., train-v1.1.json")
 
+# flags.DEFINE_string(
+#     "predict_file", curdir + "/DuReader/preprocessed/zhidao.dev.json",
+#     "SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
+
 flags.DEFINE_string(
-    "predict_file", None,
+    "predict_file", curdir + "/data/wait_answer.json",
     "SQuAD json for predictions. E.g., dev-v1.1.json or test-v1.1.json")
 
 flags.DEFINE_string(
-    "init_checkpoint", None,
+    "init_checkpoint", BERT_BASE_DIR + "/bert_model.ckpt",
     "Initial checkpoint (usually from a pre-trained BERT model).")
 
 flags.DEFINE_bool(
@@ -83,7 +95,7 @@ flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_predict", False, "Whether to run eval on the dev set.")
 
-flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
+flags.DEFINE_integer("train_batch_size", 8, "Total batch size for training.")
 
 flags.DEFINE_integer("predict_batch_size", 8,
                      "Total batch size for predictions.")
@@ -153,12 +165,22 @@ flags.DEFINE_float(
     "null_score_diff_threshold", 0.0,
     "If null_score - best_non_null is greater than the threshold predict null.")
 
+# Misc Parameters
+flags.DEFINE_boolean(
+    "allow_soft_placement", True,
+    "Allow device soft device placement")
 
-class SquadExample(object):
-    """A single training/test example for simple sequence classification.
+flags.DEFINE_boolean(
+    "log_device_placement", False,
+    "Log placement of ops on devices")
+
+
+class DuReaderBert(object):
+    """
+    A single training/test example for simple sequence classification.
 
      For examples without an answer, the start and end position are -1.
-  """
+    """
 
     def __init__(self,
                  qas_id,
@@ -195,7 +217,9 @@ class SquadExample(object):
 
 
 class InputFeatures(object):
-    """A single set of features of data."""
+    """
+    A single set of features of data.
+    """
 
     def __init__(self,
                  unique_id,
@@ -224,92 +248,102 @@ class InputFeatures(object):
         self.is_impossible = is_impossible
 
 
-def read_squad_examples(input_file, is_training):
-    """Read a SQuAD json file into a list of SquadExample."""
-    with tf.gfile.Open(input_file, "r") as reader:
-        input_data = json.load(reader)["data"]
+def read_dureader(input_file, is_training):
+    """
+    Read a DuReader json file into a list of DuReaderList.
+    :param input_file:
+    :param is_training:
+    :return: DuReaderList
+    """
 
     def is_whitespace(c):
         if c == " " or c == "\t" or c == "\r" or c == "\n" or ord(c) == 0x202F:
             return True
         return False
 
-    examples = []
-    for entry in input_data:
-        for paragraph in entry["paragraphs"]:
-            paragraph_text = paragraph["context"]
-            doc_tokens = []
-            char_to_word_offset = []
-            prev_is_whitespace = True
-            for c in paragraph_text:
-                if is_whitespace(c):
-                    prev_is_whitespace = True
-                else:
-                    if prev_is_whitespace:
-                        doc_tokens.append(c)
-                    else:
-                        doc_tokens[-1] += c
-                    prev_is_whitespace = False
-                char_to_word_offset.append(len(doc_tokens) - 1)
+    def is_control(char):
+        """Checks whether `chars` is a control character."""
+        # These are technically control characters but we count them as whitespace characters.
+        if char == "\t" or char == "\n" or char == "\r":
+            return False
+        cat = unicodedata.category(char)
+        if cat.startswith("C"):
+            return True
+        return False
 
-            for qa in paragraph["qas"]:
-                qas_id = qa["id"]
-                question_text = qa["question"]
-                start_position = None
-                end_position = None
-                orig_answer_text = None
-                is_impossible = False
-                if is_training:
+    def clean_text(text):
+        """Performs invalid character removal and whitespace cleanup on text."""
+        output = []
+        for char in text:
+            cp = ord(char)
+            if cp == 0 or cp == 0xfffd or is_control(char):
+                continue
+            if is_whitespace(char):
+                output.append(" ")
+            else:
+                output.append(char)
+        return "".join(output)
 
-                    if FLAGS.version_2_with_negative:
-                        is_impossible = qa["is_impossible"]
-                    if (len(qa["answers"]) != 1) and (not is_impossible):
-                        raise ValueError(
-                            "For training, each question should have exactly 1 answer.")
-                    if not is_impossible:
-                        answer = qa["answers"][0]
-                        orig_answer_text = answer["text"]
-                        answer_offset = answer["answer_start"]
-                        answer_length = len(orig_answer_text)
-                        start_position = char_to_word_offset[answer_offset]
-                        end_position = char_to_word_offset[answer_offset + answer_length -
-                                                           1]
-                        # Only add answers where the text can be exactly recovered from the
-                        # document. If this CAN'T happen it's likely due to weird Unicode
-                        # stuff so we will just skip the example.
-                        #
-                        # Note that this means for training mode, every example is NOT
-                        # guaranteed to be preserved.
-                        actual_text = " ".join(
-                            doc_tokens[start_position:(end_position + 1)])
-                        cleaned_answer_text = " ".join(
-                            tokenization.whitespace_tokenize(orig_answer_text))
-                        if actual_text.find(cleaned_answer_text) == -1:
-                            tf.logging.warning("Could not find answer: '%s' vs. '%s'",
-                                               actual_text, cleaned_answer_text)
-                            continue
-                    else:
-                        start_position = -1
-                        end_position = -1
-                        orig_answer_text = ""
+    DuReaderList = []
+    with tf.gfile.Open(input_file, "r") as reader:
+        for lidx, line in enumerate(reader):
+            sample = json.loads(line.strip())
 
-                example = SquadExample(
-                    qas_id=qas_id,
-                    question_text=question_text,
-                    doc_tokens=doc_tokens,
-                    orig_answer_text=orig_answer_text,
-                    start_position=start_position,
-                    end_position=end_position,
-                    is_impossible=is_impossible)
-                examples.append(example)
+            if len(sample['answer_docs']) == 0:
+                continue
 
-    return examples
+            qas_id = sample['question_id']
+            question_text = sample['question']
+
+            orig_answer_text = None
+            start_position = None
+            end_position = None
+
+            is_impossible = False
+
+            answer_docs = sample['answer_docs'][0]
+            most_related_documents = sample['documents'][answer_docs]
+            most_related_para_id = most_related_documents['most_related_para']
+            most_related_para_seg = most_related_documents['segmented_paragraphs'][most_related_para_id]
+            doc_tokens = most_related_para_seg
+
+            if is_training:
+                if len(sample['answer_spans']) == 0:
+                    continue
+                if sample['answer_spans'][0][1] >= 500:
+                    continue
+
+                start_position = sample['answer_spans'][0][0]
+                end_position = sample['answer_spans'][0][1]
+
+                orig_answer_text = sample['fake_answers'][0]
+
+            # for d_idx, doc in enumerate(sample['documents']):
+            #     if is_training:
+            #         if doc['is_selected']:
+            #             most_related_para_id = doc['most_related_para']
+            #             most_related_para_seg = doc['segmented_paragraphs'][most_related_para_id]
+            #             doc_tokens = most_related_para_seg
+
+            example = DuReaderBert(
+                qas_id=qas_id,
+                question_text=question_text,
+                doc_tokens=doc_tokens,
+                orig_answer_text=orig_answer_text,
+                start_position=start_position,
+                end_position=end_position,
+                is_impossible=is_impossible
+            )
+            DuReaderList.append(example)
+
+    return DuReaderList
 
 
 def convert_examples_to_features(examples, tokenizer, max_seq_length,
-                                 doc_stride, max_query_length, is_training,
-                                 output_fn):
-    """Loads a data file into a list of `InputBatch`s."""
+                                 doc_stride, max_query_length, is_training, output_fn):
+    """
+    Loads a data file into a list of `InputBatch`s.
+    """
 
     unique_id = 1000000000
 
@@ -505,9 +539,9 @@ def _improve_answer_span(doc_tokens, input_start, input_end, tokenizer,
         for new_end in range(input_end, new_start - 1, -1):
             text_span = " ".join(doc_tokens[new_start:(new_end + 1)])
             if text_span == tok_answer_text:
-                return (new_start, new_end)
+                return new_start, new_end
 
-    return (input_start, input_end)
+    return input_start, input_end
 
 
 def _check_is_max_context(doc_spans, cur_span_index, position):
@@ -584,7 +618,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
     (start_logits, end_logits) = (unstacked_logits[0], unstacked_logits[1])
 
-    return (start_logits, end_logits)
+    return start_logits, end_logits
 
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
@@ -662,6 +696,13 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
             train_op = optimization.create_optimizer(
                 total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
 
+            # output_spec = tf.estimator.EstimatorSpec(
+            #     mode=mode,
+            #     loss=total_loss,
+            #     train_op=train_op,
+            #     scaffold_fn=scaffold_fn
+            # )
+
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
                 loss=total_loss,
@@ -673,6 +714,8 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                 "start_logits": start_logits,
                 "end_logits": end_logits,
             }
+            # output_spec = tf.estimator.EstimatorSpec(
+            #     mode=mode, predictions=predictions, scaffold_fn=scaffold_fn)
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode, predictions=predictions, scaffold_fn=scaffold_fn)
         else:
@@ -760,6 +803,7 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
     all_predictions = collections.OrderedDict()
     all_nbest_json = collections.OrderedDict()
     scores_diff_json = collections.OrderedDict()
+    tk_json_list = []
 
     for (example_index, example) in enumerate(all_examples):
         features = example_index_to_features[example_index]
@@ -906,18 +950,31 @@ def write_predictions(all_examples, all_features, all_results, n_best_size,
             score_diff = score_null - best_non_null_entry.start_logit - (
                 best_non_null_entry.end_logit)
             scores_diff_json[example.qas_id] = score_diff
+            best_answer = ""
             if score_diff > FLAGS.null_score_diff_threshold:
+                # best_answer = ""
                 all_predictions[example.qas_id] = ""
             else:
+                # best_answer = best_non_null_entry.text
                 all_predictions[example.qas_id] = best_non_null_entry.text
+
+        json_str = {
+            "id": example.qas_id,
+            "answer": all_predictions[example.qas_id].replace(' ', ''),
+            "question": example.question_text,
+            "paragraphs": ''.join(example.doc_tokens)
+        }
+        tk_json_list.append(json_str)
 
         all_nbest_json[example.qas_id] = nbest_json
 
-    with tf.gfile.GFile(output_prediction_file, "w") as writer:
-        writer.write(json.dumps(all_predictions, indent=4) + "\n")
-
+    # with tf.gfile.GFile(output_prediction_file, "w") as writer:
+    with open(output_prediction_file, 'w', encoding='utf-8') as prediction_writer:
+        # writer.write(json.dumps(all_predictions, indent=4, ensure_ascii=False) + "\n")
+        for json_line in tk_json_list:
+            prediction_writer.write(str(json.dumps(json_line, ensure_ascii=False)) + '\n')
     with tf.gfile.GFile(output_nbest_file, "w") as writer:
-        writer.write(json.dumps(all_nbest_json, indent=4) + "\n")
+        writer.write(json.dumps(all_nbest_json, indent=4, ensure_ascii=False) + "\n")
 
     if FLAGS.version_2_with_negative:
         with tf.gfile.GFile(output_null_log_odds_file, "w") as writer:
@@ -1155,7 +1212,7 @@ def main(_):
     num_train_steps = None
     num_warmup_steps = None
     if FLAGS.do_train:
-        train_examples = read_squad_examples(
+        train_examples = read_dureader(
             input_file=FLAGS.train_file, is_training=True)
         num_train_steps = int(
             len(train_examples) / FLAGS.train_batch_size * FLAGS.num_train_epochs)
@@ -1215,7 +1272,7 @@ def main(_):
         estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
 
     if FLAGS.do_predict:
-        eval_examples = read_squad_examples(
+        eval_examples = read_dureader(
             input_file=FLAGS.predict_file, is_training=False)
 
         eval_writer = FeatureWriter(

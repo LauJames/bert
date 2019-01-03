@@ -114,3 +114,14 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+/model/chinese_L-12_H-768_A-12/
+/squad/
+/data/KFRtrain.txt
+/data/KFRval.txt
+/data/wait_answer.json
+/data/康护一生注释问题.xlsx
+/data/阅读理解条款.xlsx
+/DuReader/DuReaderDemo/
+/DuReader/preprocessed/
+/result/
+/tests.py
